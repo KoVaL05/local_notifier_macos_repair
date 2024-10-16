@@ -1,97 +1,102 @@
 import Cocoa
 import FlutterMacOS
+import UserNotifications
 
-public class LocalNotifierPlugin: NSObject, FlutterPlugin, NSUserNotificationCenterDelegate {
-    var registrar: FlutterPluginRegistrar!;
+public class LocalNotifierPlugin: NSObject, FlutterPlugin {
+    var registrar: FlutterPluginRegistrar!
     var channel: FlutterMethodChannel!
-    
-    var notificationDict: Dictionary<String, NSUserNotification> = [:]
-    
+
+    var notificationDict: [String: UNNotificationRequest] = [:]
+
     public override init() {
         super.init()
-        NSUserNotificationCenter.default.delegate = self
+        requestNotificationPermissions()
     }
-    
+
     public static func register(with registrar: FlutterPluginRegistrar) {
-        let channel = FlutterMethodChannel(name: "local_notifier", binaryMessenger: registrar.messenger)
+        let channel = FlutterMethodChannel(
+            name: "local_notifier", binaryMessenger: registrar.messenger)
         let instance = LocalNotifierPlugin()
         instance.registrar = registrar
         instance.channel = channel
         registrar.addMethodCallDelegate(instance, channel: channel)
     }
-    
+
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        switch (call.method) {
+        switch call.method {
         case "notify":
             notify(call, result: result)
-            break
         case "close":
             close(call, result: result)
-            break
         default:
             result(FlutterMethodNotImplemented)
         }
     }
-    
+
+    private func requestNotificationPermissions() {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if let error = error {
+                print("Failed to request authorization: \(error)")
+            }
+        }
+    }
+
     public func notify(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        let args = call.arguments as! Dictionary<String, Any>
-        let identifier: String = args["identifier"] as! String
-        let title: String? = args["title"] as? String
-        let subtitle: String? = args["subtitle"] as? String
-        let body: String? = args["body"] as? String
-        
-        let notification = NSUserNotification()
-        notification.identifier = identifier
-        notification.title = title
-        notification.subtitle = subtitle
-        notification.informativeText = body
-        notification.soundName = NSUserNotificationDefaultSoundName
-        
-        let actions: [NSDictionary]? = args["actions"] as? [NSDictionary];
-        
-        if (actions != nil && !(actions!.isEmpty)) {
-            let actionDict =  actions!.first as! [String: Any]
-            let actionText: String? = actionDict["text"] as? String
-            notification.actionButtonTitle = actionText!
+        guard let args = call.arguments as? [String: Any],
+            let identifier = args["identifier"] as? String,
+            let title = args["title"] as? String,
+            let body = args["body"] as? String
+        else {
+            result(
+                FlutterError(
+                    code: "INVALID_ARGUMENTS", message: "Invalid arguments for notification",
+                    details: nil))
+            return
         }
-        
-        NSUserNotificationCenter.default.deliver(notification)
-        self.notificationDict[identifier] = notification
-        
-        result(true)
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = UNNotificationSound.default
+
+        if let actions = args["actions"] as? [[String: Any]], let action = actions.first,
+            let actionText = action["text"] as? String
+        {
+            let notificationAction = UNNotificationAction(
+                identifier: actionText, title: actionText, options: [])
+            let category = UNNotificationCategory(
+                identifier: "customCategory", actions: [notificationAction], intentIdentifiers: [],
+                options: [])
+            UNUserNotificationCenter.current().setNotificationCategories([category])
+            content.categoryIdentifier = "customCategory"
+        }
+
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("Error adding notification: \(error)")
+                result(false)
+                return
+            }
+            self.notificationDict[identifier] = request
+            result(true)
+        }
     }
-    
+
     public func close(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        let args = call.arguments as! Dictionary<String, Any>
-        let identifier: String = args["identifier"] as! String
-        
-        let notification: NSUserNotification? = self.notificationDict[identifier]
-        
-        if (notification != nil) {
-            NSUserNotificationCenter.default.removeDeliveredNotification(notification!)
-            self.notificationDict[identifier] = nil
-            
-            _invokeMethod("onLocalNotificationClose", identifier)
+        guard let args = call.arguments as? [String: Any],
+            let identifier = args["identifier"] as? String
+        else {
+            result(
+                FlutterError(
+                    code: "INVALID_ARGUMENTS",
+                    message: "Invalid arguments for closing notification", details: nil))
+            return
         }
+
+        notificationDict[identifier] = nil
         result(true)
-    }
-    
-    public func userNotificationCenter(_ center: NSUserNotificationCenter, didActivate notification: NSUserNotification) {
-        _invokeMethod("onLocalNotificationClick", notification.identifier!)
-    }
-    
-    public func userNotificationCenter(_ center: NSUserNotificationCenter, didDeliver notification: NSUserNotification) {
-        _invokeMethod("onLocalNotificationShow", notification.identifier!)
-    }
-    
-    public func userNotificationCenter(_ center: NSUserNotificationCenter, shouldPresent notification: NSUserNotification) -> Bool {
-        return true
-    }
-    
-    public func _invokeMethod(_ methodName: String, _ notificationId: String) {
-        let args: NSDictionary = [
-            "notificationId": notificationId,
-        ]
-        channel.invokeMethod(methodName, arguments: args, result: nil)
     }
 }
